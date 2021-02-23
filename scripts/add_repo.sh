@@ -7,7 +7,7 @@ source "$(dirname $0)/utils.sh"
 case "$*" in
 	*" -h"*|"-h"|*" --help"*|"--help"|"")
 	echo "Add a new upstream repository to track in the $staging_dir directory"
-	echo "usage: $0 <git remote url>"
+	echo "usage: $0 <git remote url> [<branch/tag>]"
 	exit 0
 	;;
 esac
@@ -19,6 +19,7 @@ remote_url=$1
 
 remote_name=$(echo $remote_url | sed 's!.*/\([^\/]*\)!\1!' | sed 's/.git$//')
 remote_dir="$staging_dir/$remote_name"
+target_branch=${2:-master}
 update_tracked=false
 add_subtree=false
 
@@ -50,10 +51,27 @@ if [ ! -d "$remote_dir" ]; then
 
 	# add the subtree
 	git remote update $remote_name
-	ref=$(git show-ref remotes/$remote_name/master -s)
-	git subtree add --prefix="$remote_dir" "$remote_name" --squash master
-	sh -c "cd $remote_dir && go mod edit -replace $downstream_repo=../../"
-	git add $remote_dir/go.mod
+	ref=$(git show-ref remotes/$remote_name/${target_branch} -s)
+	git subtree add --prefix="$remote_dir" "$remote_name" --squash ${target_branch}
+	new_mod=$(cd $remote_dir && go list -m)
+
+	for staged_dep in $(ls $staging_dir | grep -v "^$remote_name$"); do
+		staged_mod=$(cd $staging_dir/$staged_dep && go list -m)
+		grep "$staged_mod" $remote_dir/go.mod && sh -c "cd $remote_dir && \
+								go mod edit -require $staged_mod@v0.0.0-00010101000000-000000000000 && \
+								go mod edit -replace $staged_mod=../$staged_dep"
+		grep "$new_mod" $staging_dir/$staged_dep/go.mod && sh -c "cd $staging_dir/$staged_dep && \
+								go mod edit -require $new_mod@v0.0.0-00010101000000-000000000000 && \
+								go mod edit -replace $new_mod=../$remote_name && \
+								go mod vendor && \
+								git add go.mod go.sum vendor"
+	done
+
+	sh -c "cd $remote_dir && \
+		go mod edit -replace $downstream_repo=../.. && \
+		go mod vendor && \
+		git add go.mod go.sum vendor"
+	git rm $remote_dir/OWNERS
 	git commit --amend --no-edit
 	echo "Added new subtree $remote_dir"
 	add_subtree=true
@@ -76,10 +94,13 @@ if $add_subtree ; then
 	# push to subtree dir
 
 	FORK_REMOTE=${FORK_REMOTE:-origin}
+	git checkout ${current_branch}
+	git merge --squash -s recursive -X theirs -m "Sync upstream $upstream_remote_name $target_branch" ${temp_branch}
 #	fork_branch="add_tracked_upstream_$remote_name"	
 #	git push ${FORK_REMOTE} ${temp_branch}:"refs/heads/$fork_branch"
 #	echo "Pushed changes to ${FORK_REMOTE} ${temp_branch}:$fork_branch"
 #	echo "You can now create a PR for the update"
+
 	echo "!!! Added a new subrepo, you can now make any needed updates to the build files and Makefile"
 	echo ""
 	git diff --dirstat ${current_branch}..${temp_branch}
