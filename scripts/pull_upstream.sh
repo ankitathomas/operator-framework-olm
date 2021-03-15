@@ -31,25 +31,24 @@ if [ "$remote_dir" = "${staging_dir}/" ] || [ ! -d "${remote_dir}" ]; then
 fi
 
 rel_remote_dir="$(realpath --relative-to ${repo_root} ${remote_dir})"
-
 git fetch -t "${remote_name}" "${remote_ref}"
 git subtree split --prefix="${rel_remote_dir}" --rejoin -b "${split_branch}" 
 
 git subtree pull --squash -m "Sync upstream ${remote_name} ${remote_ref}" --prefix="${rel_remote_dir}" "${remote_name}" "${remote_ref}"
 git branch -D "${split_branch}" || true
-
 for staged_dep in $(ls "${staging_dir}" | grep -v "^${remote_name}$"); do
-	staged_mod=$(cd ${staging_dir}/${staged_dep} && go list -m)
+	staged_mod=$(cd ${staging_dir}/${staged_dep} && go list -m --mod=mod)
 	grep "${staged_mod}" "${remote_dir}/go.mod" && sh -c "cd ${remote_dir} && \
 							go mod edit -require ${staged_mod}@v0.0.0-00010101000000-000000000000 && \
-							go mod edit -replace ${staged_mod}=../${staged_dep}"
+							go mod edit -replace ${staged_mod}=../${staged_dep} && \
+							git add go.sum go.mod"
 done
 
 rel_repo_root="$(realpath --relative-to ${remote_dir} ${repo_root})"
 sh -c "cd ${remote_dir} && \
 	go mod edit -replace ${downstream_repo}=${rel_repo_root} && \
-	go mod vendor && \
-	git add go.mod go.sum vendor"
+	git rm -r vendor && \
+	git add go.mod go.sum"
 
 # remove nested OWNERS file for openshift CI
 git rm "${remote_dir}/OWNERS"
@@ -60,24 +59,20 @@ remote_hash=$(git show-ref remotetags/${remote_name}/${remote_ref} -s)
 grep "^${remote_name} " "${repo_list}" && \
 		sed -i 's!\('"${remote_name}"' '"${remote_url}"'\).*!\1 '"${remote_ref}"' '"${remote_hash}"'!' "${repo_list}" || \
 		echo "${remote_name} ${remote_url} ${remote_ref} ${remote_hash}" >> "${repo_list}"
-git add "${repo_list}"
+git add "${repo_list}" "${staging_dir}"
 
 git commit --amend --no-edit
 
 FORK_REMOTE=${FORK_REMOTE:-origin}
 git diff --dirstat "${current_branch}".."${temp_branch}"
 
+git checkout "${current_branch}"
+git merge --squash -s recursive -X theirs -m "Sync upstream ${remote_name} ${remote_ref}" "${temp_branch}"
+git commit -m "Sync upstream ${remote_name} ${remote_ref}"
+
 
 printf "\\n\\n!!! Upstream merge complete!\\n"
 echo "!!! You can now inspect the branch."
 echo ""
-echo "!!! To cherry-pick the changes to your original branch, run:"
-echo "  git checkout ${current_branch}"
-echo "  git cherry-pick -m 2 "'$('"git merge-base ${current_branch} ${temp_branch})..${temp_branch}"
-echo ""
-echo "!!! To merge the changes to your original branch, run:"
-echo "  git checkout ${current_branch}"
-echo "  git merge --squash -s recursive -X theirs -m 'Sync upstream ${remote_name} ${remote_ref}'" "${temp_branch}"
-echo ""
 echo "!!! Once the changes look good, you can push the changes to the remote repository with:"
-echo "  git push ${FORK_REMOTE} ${temp_branch}"
+echo "  git push ${FORK_REMOTE} ${current_branch}"
